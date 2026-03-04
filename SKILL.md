@@ -189,10 +189,10 @@ Claude 会返回可直接使用的 chapters.json 内容。
 
 ## 文件位置
 
-脚本路径：`C:/Users/Qyc/video_chapter_splitter.py`
+脚本路径：`C:/Users/xxx/video_chapter_splitter.py`   ===> 根据用户的情况创建
 
 建议添加到系统 PATH，或创建 alias：
 
 ```bash
-alias vcs='python C:/Users/Qyc/video_chapter_splitter.py'
+alias vcs='python C:/xx/xxx/video_chapter_splitter.py'
 ```
