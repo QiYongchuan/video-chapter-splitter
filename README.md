@@ -125,8 +125,9 @@ python video_chapter_splitter.py "video.mp4" --split-only
 
 Created with Claude Code in 5 minutes.
 
-博客文章：[5 分钟，我用 Claude Code 造了一个视频语义切割工具](#)
+博客文章：[10 分钟，我用 Claude Code 造了一个视频语义切割工具](https://x.com/nopinduoduo/status/2029112063256346969)
 
 ## License
 
 MIT License
+
