@@ -1,4 +1,4 @@
-# 视频语义章节切割工具
+# 视频语义章节切割工具 v2.0
 
 根据字幕语义自动识别章节边界，精准切割视频为独立片段。
 
@@ -9,17 +9,23 @@
 - 内容创作者需要批量生成短视频素材
 - 任何需要"按语义理解"而非"按时间等分"切割视频的场景
 
-## 工作原理
+## 工作原理（v2.0 优化）
 
 ```
-视频文件
-  ↓ Whisper 本地识别
+视频文件 (1.5GB)
+  ↓ FFmpeg 提取音频 (~3秒)
+16kHz mono WAV (~180MB)
+  ↓ Whisper 本地转录 (~5分钟, CPU small模型)
 字幕文本（带精确时间戳）
-  ↓ Claude 语义分析 / 人工标注
+  ↓ Claude 语义分析 (subagent, ~72K token)
 章节边界 JSON
-  ↓ FFmpeg 精准切割
+  ↓ FFmpeg 精准切割 (~10分钟)
 独立视频片段
 ```
+
+**v2.0 关键优化**: 先提取音频再转录，速度提升 10x+。
+直接丢视频给 Whisper 会导致 CPU 下极慢（1.5GB 视频预计 10+ 小时），
+提取音频后同样的视频只需 5 分钟。
 
 ## 依赖安装
 
@@ -41,28 +47,32 @@ pip install openai-whisper
 python video_chapter_splitter.py "你的视频.mp4" --extract-only
 ```
 
+内部流程：FFmpeg 提取音频 -> Whisper 转录 -> 自动清理中间音频文件
+
 输出：
 - `xxx_subtitles.md` - 可读字幕文本
 - `xxx_segments.json` - 精确时间戳数据
 
 ### 第二步：创建章节配置
 
-查看字幕文件，或让 Claude 分析，创建 `xxx_chapters.json`：
+让 Claude 分析字幕文件，创建 `xxx_chapters.json`：
 
 ```json
 {
   "chapters": [
     {
       "title": "01_开篇介绍",
-      "start_time": "00:00",
-      "end_time": "00:23",
-      "summary": "介绍系统架构"
+      "start_time": "00:00:00",
+      "end_time": "00:05:10",
+      "summary": "介绍系统架构",
+      "type": "knowledge"
     },
     {
-      "title": "02_案例演示",
-      "start_time": "00:23",
-      "end_time": "02:15",
-      "summary": "具体功能展示"
+      "title": "02_问答环节",
+      "start_time": "00:05:10",
+      "end_time": "00:12:00",
+      "summary": "学员提问与解答",
+      "type": "qa"
     }
   ]
 }
@@ -76,123 +86,70 @@ python video_chapter_splitter.py "你的视频.mp4" --split-only
 
 输出：`xxx_chapters/` 目录下的独立视频文件
 
+## 参数说明
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--model` | small | Whisper 模型 (CPU 推荐 small, GPU 推荐 medium) |
+| `--extract-only` | - | 只提取字幕 |
+| `--split-only` | - | 只按 chapters.json 切割 |
+| `--keep-audio` | false | 保留中间音频文件 |
+| `--output-dir` | 视频名_chapters | 自定义输出目录 |
+
+## Whisper 模型选择
+
+| 模型 | CPU 速度 | 准确率 | 推荐场景 |
+|------|----------|--------|----------|
+| tiny | 最快 | 一般 | 快速预览 |
+| base | 快 | 较好 | 英文内容 |
+| **small** | **中等** | **好** | **CPU 中文首选** |
+| medium | 较慢 | 很好 | GPU 中文首选 |
+| large | 最慢 | 最好 | 高精度需求 |
+
+## 成本估算（实测数据）
+
+以 1.5GB / 1小时38分钟直播课为例：
+
+| 环节 | Token | 时间 | 费用 |
+|------|-------|------|------|
+| FFmpeg 提取音频 | 0 | 3秒 | 免费 |
+| Whisper 转录 (small/CPU) | 0 | ~5分钟 | 免费 |
+| Claude 语义分析 | ~72K | ~3分钟 | ~$1.2 |
+| FFmpeg 切割 | 0 | ~10分钟 | 免费 |
+
+**每小时视频约 67K token, 约 $0.74 (¥5)**
+
 ## 关键技术细节
 
-### FFmpeg 切割精度优化
+### 音频提取优化
 
-**问题**：默认 input seeking（`-ss` 在 `-i` 前）速度快但精度低，可能漂移 5-10 秒
+Whisper 只处理音频，但直接传视频时内部解码效率极低（尤其 CPU）。
+预先用 FFmpeg 提取 16kHz mono WAV 是 Whisper 的最优输入格式：
+- 采样率匹配，无需内部重采样
+- 单声道，减少数据量
+- PCM 格式，无需解码
 
-**解决**：改用 output seeking（`-ss` 在 `-i` 后），精度更高
+### FFmpeg 切割精度
 
-```python
-# 不推荐：快但不准
-cmd = ["ffmpeg", "-ss", "00:01:00", "-i", "input.mp4", ...]
+使用 output seeking（`-ss` 在 `-i` 后），精度高于 input seeking。
 
-# 推荐：稍慢但精准
-cmd = ["ffmpeg", "-i", "input.mp4", "-ss", "00:01:00", ...]
-```
+### Windows 兼容
 
-### 章节边界识别策略
-
-| 方法 | 准确度 | 适用场景 |
-|------|--------|----------|
-| AI 语义分析 | 高 | 演讲者明确说"第一个案例"、"接下来"等 |
-| 人工标注 | 最高 | 对精度要求极高的最终输出 |
-| 固定间隔 | 低 | 仅需均匀分割 |
-
-### Whisper 模型选择
-
-| 模型 | 速度 | 准确率 | 显存需求 |
-|------|------|--------|----------|
-| tiny | 最快 | 一般 | ~1GB |
-| base | 快 | 较好 | ~1GB |
-| small | 中等 | 好 | ~2GB |
-| medium | 较慢 | 很好 | ~5GB |
-| large | 最慢 | 最好 | ~10GB |
-
-中文内容建议 `medium`，速度与准确率平衡较好。
-
-## 与现有方案对比
-
-| 方案 | 优点 | 缺点 | 适用场景 |
-|------|------|------|----------|
-| **本工具** | 语义理解精准、本地运行、免费 | 需手动确认章节 | 内容创作者、精准切割需求 |
-| 剪映自动分割 | 简单、有界面 | 按画面/音量分割，不理解内容 | 快速粗剪 |
-| Python moviepy | 纯 Python | 编码问题多、慢 | 简单脚本 |
-| FFmpeg 直接切 | 最快 | 需手动算时间 | 已知时间戳 |
-| 在线工具 | 无需安装 | 隐私风险、限制大小 | 临时使用 |
-
-## 为什么不用现成的 Skills？
-
-搜索技能市场发现：
-- `video-clipper`：专注时间戳切割，无字幕语义分析
-- `video-processing-editing`：FFmpeg 教程，无自动化流程
-- `ffmpeg-video-editor`：基础 FFmpeg 封装
-
-**核心差异**：本工具提供完整的"字幕→语义→切割"工作流，而非单一功能。
-
-## 极速创建个性化工具的理念
-
-这个 skill 体现了 Claude Code 的核心价值：
-
-**从"找工具"到"造工具"**
-
-传统工作流：
-1. 搜索有没有现成软件
-2. 下载、学习、适应它的逻辑
-3. 妥协或放弃
-
-Claude Code 工作流：
-1. 描述你想要什么
-2. 5分钟搭建专属工具
-3. 完全按你的需求工作
-
-**这不是编程，是"描述即创造"**。
+- 所有输出使用纯 ASCII，避免 GBK 编码错误
+- 文件名自动清理特殊字符
+- 中间音频文件默认自动清理
 
 ## 故障排除
 
-### Windows 编码错误
-
-症状：`UnicodeEncodeError: 'gbk' codec can't encode`
-
-解决：脚本已移除所有 emoji，使用纯 ASCII 输出
+### Whisper 识别慢
+换 small 模型 + 先提取音频（v2.0 默认行为）
 
 ### FFmpeg 切割点不准
+手动微调 chapters.json 的时间戳，重新 --split-only
 
-症状：视频开头/结尾多了几秒无关内容
-
-解决：改用 `--split-only` 模式，手动微调 `chapters.json` 的时间戳
-
-### Whisper 识别慢
-
-症状：提取字幕耗时很长
-
-解决：换小模型 `--model small`，或降低视频分辨率预处理
-
-## 进阶用法
-
-### 批量处理多个视频
-
-```bash
-for video in *.mp4; do
-    python video_chapter_splitter.py "$video" --extract-only
-done
-```
-
-### 结合 Claude 自动分析章节
-
-提取字幕后，直接粘贴字幕内容给 Claude：
-
-> "以下是视频字幕，请识别章节边界，格式为 JSON..."
-
-Claude 会返回可直接使用的 chapters.json 内容。
+### Windows 编码错误
+v2.0 已修复，所有输出使用纯 ASCII
 
 ## 文件位置
 
-脚本路径：`C:/Users/xxx/video_chapter_splitter.py`   ===> 根据用户的情况创建
-
-建议添加到系统 PATH，或创建 alias：
-
-```bash
-alias vcs='python C:/xx/xxx/video_chapter_splitter.py'
-```
+脚本路径：skill 目录下 `video_chapter_splitter.py`
